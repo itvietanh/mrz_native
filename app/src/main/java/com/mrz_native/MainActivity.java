@@ -53,7 +53,7 @@ import android.view.WindowManager;
 
 public class MainActivity extends AppCompatActivity {
     private static final int REQ_CODE = 101;
-    private static final long OCR_FRAME_INTERVAL_MS = 100; // throttle OCR slightly faster
+    private static final long OCR_FRAME_INTERVAL_MS = 120; // give sensor time to refocus
     private static final int REQUIRED_STABLE_HITS = 2; // frames to confirm
     private PreviewView previewView;
     private TextView statusText;
@@ -455,6 +455,21 @@ public class MainActivity extends AppCompatActivity {
             norms.add(n);
         }
 
+        // Ưu tiên TD3 (passport) trước để tăng tỉ lệ hộ chiếu
+        for (int i = 0; i + 1 < norms.size(); i++) {
+            String a = norms.get(i);
+            String b = norms.get(i + 1);
+            if ((isLengthApprox(a, 44) || isLengthApprox(b, 44) || (a.startsWith("P") || b.startsWith("P")))
+                    && looksLikeMrzLine(a) && looksLikeMrzLine(b)) {
+                String l1 = padToLength(a, 44);
+                String l2 = padToLength(b, 44);
+                try {
+                    ParsedMrz p = MrzParser.parseTD3(l1, l2);
+                    if (p != null) return p;
+                } catch (Exception ex) { }
+            }
+        }
+
         // Thử tìm TD1 (3 dòng x ~30)
         for (int i = 0; i + 2 < norms.size(); i++) {
             String a = norms.get(i);
@@ -474,7 +489,7 @@ public class MainActivity extends AppCompatActivity {
             }
         }
 
-        // Thử tìm TD3 (2 dòng x ~44) và TD2 (2 dòng x ~36)
+        // Thử tìm TD3 (2 dòng x ~44) và TD2 (2 dòng x ~36) (lượt 2)
         for (int i = 0; i + 1 < norms.size(); i++) {
             String a = norms.get(i);
             String b = norms.get(i + 1);
@@ -519,7 +534,8 @@ public class MainActivity extends AppCompatActivity {
         if (s == null) return false;
         int len = s.length();
         // Khoảng dung sai nới lỏng: -10/+5 ký tự để chịu lỗi OCR
-        return len >= target - 10 && len <= target + 5;
+        // siết biên độ để giảm nhiễu: -6/+3
+        return len >= target - 6 && len <= target + 3;
     }
 
     private String padToLength(String s, int len) {
@@ -536,8 +552,8 @@ public class MainActivity extends AppCompatActivity {
         int len = s.length();
         int chevrons = 0;
         for (int i = 0; i < len; i++) if (s.charAt(i) == '<') chevrons++;
-        // MRZ lines usually contain many '<' as fillers; require at least ~15% '<'
-        return chevrons >= Math.max(2, Math.round(len * 0.15f));
+        // MRZ lines usually contain many '<' as fillers; require at least ~10% '<'
+        return chevrons >= Math.max(2, Math.round(len * 0.10f));
     }
 
     // ---------- Heuristic corrections (mạnh hơn) ----------
@@ -626,7 +642,7 @@ public class MainActivity extends AppCompatActivity {
     // ---------- UI helpers ----------
     private void onMrzSuccess(ParsedMrz parsed) {
         runOnUiThread(() -> {
-            mrzFrame.setBackgroundResource(R.drawable.mrz_frame); // bạn thêm drawable
+            mrzFrame.setBackgroundResource(R.drawable.mrz_frame_success);
             String result = "QUÉT THÀNH CÔNG!\n" +
                     "Họ Tên: " + parsed.name + "\n" +
                     "Số HC: " + parsed.documentNumber + "\n" +
@@ -641,7 +657,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void onMrzCorrected(ParsedMrz parsed) {
         runOnUiThread(() -> {
-            mrzFrame.setBackgroundResource(R.drawable.mrz_frame);
+            mrzFrame.setBackgroundResource(R.drawable.mrz_frame_success);
             String result = "QUÉT THÀNH CÔNG (SỬA LỖI OCR)!\n" +
                     "Họ Tên: " + parsed.name + "\n" +
                     "Số HC: " + parsed.documentNumber + "\n" +
@@ -708,13 +724,13 @@ public class MainActivity extends AppCompatActivity {
             MeteringPointFactory factory = previewView.getMeteringPointFactory();
             if (factory == null) return;
 
-            float cx = (mrzFrame.getX() + mrzFrame.getWidth() / 2f) / (float) previewView.getWidth();
-            float cy = (mrzFrame.getY() + mrzFrame.getHeight() / 2f) / (float) previewView.getHeight();
+            // PreviewView's factory expects coordinates in the view's pixel space
+            float cx = mrzFrame.getX() + mrzFrame.getWidth() / 2f;
+            float cy = mrzFrame.getY() + mrzFrame.getHeight() / 2f;
 
-            // Factory expects normalized [0,1] coordinates
             MeteringPoint afPoint = factory.createPoint(cx, cy);
             FocusMeteringAction action = new FocusMeteringAction.Builder(afPoint,
-                    FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE)
+                    FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE | FocusMeteringAction.FLAG_AWB)
                     .setAutoCancelDuration(3, TimeUnit.SECONDS)
                     .build();
             cameraControl.startFocusAndMetering(action);

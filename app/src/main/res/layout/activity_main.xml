@@ -17,8 +17,51 @@
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent" />
 
-    <!-- 2. MRZ Guide Frame: Khung hình overlay để hướng dẫn người dùng -->
-    <!-- Sử dụng View với drawable mrz_frame làm nền. Vị trí 75% chiều cao màn hình. -->
+    <!-- 2. MRZ Guide Frame + scrims -->
+    <!-- Left scrim -->
+    <View
+        android:id="@+id/scrim_left"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="#80000000"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toStartOf="@+id/mrz_guide_frame"/>
+
+    <!-- Top scrim -->
+    <View
+        android:id="@+id/scrim_top"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="#80000000"
+        app:layout_constraintStart_toStartOf="@+id/mrz_guide_frame"
+        app:layout_constraintEnd_toEndOf="@+id/mrz_guide_frame"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toTopOf="@+id/mrz_guide_frame"/>
+
+    <!-- Right scrim -->
+    <View
+        android:id="@+id/scrim_right"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="#80000000"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toEndOf="@+id/mrz_guide_frame"
+        app:layout_constraintEnd_toEndOf="parent"/>
+
+    <!-- Bottom scrim -->
+    <View
+        android:id="@+id/scrim_bottom"
+        android:layout_width="0dp"
+        android:layout_height="0dp"
+        android:background="#80000000"
+        app:layout_constraintStart_toStartOf="@+id/mrz_guide_frame"
+        app:layout_constraintEnd_toEndOf="@+id/mrz_guide_frame"
+        app:layout_constraintTop_toBottomOf="@+id/mrz_guide_frame"
+        app:layout_constraintBottom_toBottomOf="parent"/>
+
     <View
         android:id="@+id/mrz_guide_frame"
         android:layout_width="0dp"
@@ -39,7 +82,7 @@
         android:layout_marginTop="16dp"
         android:gravity="center"
         android:padding="10dp"
-        android:text="Đặt MRZ của hộ chiếu vào khung màu vàng"
+        android:text="Đặt MRZ vào khung vàng, giữ thẳng và đủ sáng"
         android:textColor="@android:color/white"
         android:textSize="16sp"
         android:textStyle="bold"
