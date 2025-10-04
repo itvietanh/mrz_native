@@ -49,6 +49,22 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintWidth_percent="0.9"/>
 
+    <!-- 3b. OCR Debug Panel: Hiển thị các dòng IN/OUT để kiểm tra ROI -->
+    <TextView
+        android:id="@+id/ocrDebugText"
+        android:layout_width="0dp"
+        android:layout_height="120dp"
+        android:layout_marginTop="8dp"
+        android:background="#4D000000"
+        android:textColor="@android:color/white"
+        android:textSize="12sp"
+        android:padding="8dp"
+        android:scrollbars="vertical"
+        app:layout_constraintTop_toBottomOf="@id/statusText"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintWidth_percent="0.9"/>
+
     <!-- 4. Torch toggle: simple square tap target in top-right -->
     <View
         android:id="@+id/torchToggle"
