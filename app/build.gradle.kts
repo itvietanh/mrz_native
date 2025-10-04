@@ -42,10 +42,8 @@ dependencies {
     implementation(libs.camera.view)
     implementation(libs.camera.extensions)
 
-    // ML Kit
-    implementation(libs.vision.common)
-    implementation(libs.play.services.mlkit.text.recognition.common)
-    implementation(libs.play.services.mlkit.text.recognition)
+    // ML Kit (on-device, bundled)
+    implementation(libs.mlkit.text.recognition)
 
     // Test
     testImplementation(libs.junit)
