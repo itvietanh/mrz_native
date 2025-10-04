@@ -36,9 +36,9 @@
         android:id="@+id/statusText"
         android:layout_width="0dp"
         android:layout_height="wrap_content"
-        android:layout_marginTop="32dp"
+        android:layout_marginTop="16dp"
         android:gravity="center"
-        android:padding="12dp"
+        android:padding="10dp"
         android:text="Đặt MRZ của hộ chiếu vào khung màu vàng"
         android:textColor="@android:color/white"
         android:textSize="16sp"
@@ -52,13 +52,31 @@
     <!-- 4. Torch toggle: simple square tap target in top-right -->
     <View
         android:id="@+id/torchToggle"
-        android:layout_width="40dp"
-        android:layout_height="40dp"
+        android:layout_width="44dp"
+        android:layout_height="44dp"
         android:background="#66FFFFFF"
+        android:contentDescription="Bật/tắt đèn flash"
         app:layout_constraintTop_toTopOf="parent"
         app:layout_constraintEnd_toEndOf="parent"
         android:layout_marginTop="16dp"
         android:layout_marginEnd="16dp"
         tools:visibility="visible"/>
+
+    <!-- 5. Guidance hint: distance/angle/lighting -->
+    <TextView
+        android:id="@+id/guidanceText"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginBottom="16dp"
+        android:gravity="center"
+        android:padding="8dp"
+        android:text="Gợi ý: Giữ thẳng, đủ sáng, cách ~20–30cm"
+        android:textColor="#B3FFFFFF"
+        android:textSize="14sp"
+        android:background="#33000000"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintWidth_percent="0.9"/>
 
 </androidx.constraintlayout.widget.ConstraintLayout>

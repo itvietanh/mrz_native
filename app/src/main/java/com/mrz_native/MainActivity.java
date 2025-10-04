@@ -49,10 +49,11 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import android.util.Size;
+import android.view.WindowManager;
 
 public class MainActivity extends AppCompatActivity {
     private static final int REQ_CODE = 101;
-    private static final long OCR_FRAME_INTERVAL_MS = 120; // throttle OCR
+    private static final long OCR_FRAME_INTERVAL_MS = 100; // throttle OCR slightly faster
     private static final int REQUIRED_STABLE_HITS = 2; // frames to confirm
     private PreviewView previewView;
     private TextView statusText;
@@ -74,6 +75,8 @@ public class MainActivity extends AppCompatActivity {
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+        // Keep screen on during scanning session
+        getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         previewView = findViewById(R.id.previewView);
         statusText = findViewById(R.id.statusText);
         mrzFrame = findViewById(R.id.mrz_guide_frame);
@@ -113,7 +116,7 @@ public class MainActivity extends AppCompatActivity {
 
                 ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setTargetResolution(new Size(1280, 720))
+                        .setTargetResolution(new Size(1920, 1080))
                         .build();
 
                 imageAnalysis.setAnalyzer(cameraExecutor, imageProxy -> {
@@ -136,6 +139,8 @@ public class MainActivity extends AppCompatActivity {
                 setupTorchUi();
                 // Kick an initial focus/metering on MRZ guide
                 previewView.post(this::updateFocusMetering);
+                // Keep refocusing while scanning to improve sharpness
+                previewView.postDelayed(focusRepeater, 1500);
             } catch (ExecutionException | InterruptedException e) {
                 Log.e("MRZ", "Lỗi khởi tạo camera", e);
             }
@@ -348,8 +353,8 @@ public class MainActivity extends AppCompatActivity {
     private boolean isLengthApprox(String s, int target) {
         if (s == null) return false;
         int len = s.length();
-        // Khoảng dung sai: +/- 6 ký tự
-        return len >= target - 6 && len <= target + 2;
+        // Khoảng dung sai nới lỏng: -10/+5 ký tự để chịu lỗi OCR
+        return len >= target - 10 && len <= target + 5;
     }
 
     private String padToLength(String s, int len) {
@@ -366,8 +371,8 @@ public class MainActivity extends AppCompatActivity {
         int len = s.length();
         int chevrons = 0;
         for (int i = 0; i < len; i++) if (s.charAt(i) == '<') chevrons++;
-        // MRZ lines usually contain many '<' as fillers; require at least 20% '<'
-        return chevrons >= Math.max(3, len / 5);
+        // MRZ lines usually contain many '<' as fillers; require at least ~15% '<'
+        return chevrons >= Math.max(2, Math.round(len * 0.15f));
     }
 
     // ---------- Heuristic corrections (mạnh hơn) ----------
@@ -424,7 +429,7 @@ public class MainActivity extends AppCompatActivity {
     private ParsedMrz findAndParseMrzStrings(List<String> norms) {
         // chuyển về dạng OcrLine tạm để tận dụng findAndParseMrz
         List<OcrLine> tmp = new ArrayList<>();
-        for (String s : norms) tmp.add(new OcrLine(s, s));
+        for (String s : norms) tmp.add(new OcrLine(s, s, 0f));
         return findAndParseMrz(tmp);
     }
 
@@ -523,6 +528,8 @@ public class MainActivity extends AppCompatActivity {
     @Override
     protected void onDestroy() {
         super.onDestroy();
+        // Stop repeated focusing callbacks
+        if (previewView != null) previewView.removeCallbacks(focusRepeater);
         cameraExecutor.shutdown();
         recognizer.close();
     }
@@ -539,7 +546,8 @@ public class MainActivity extends AppCompatActivity {
             float cx = (mrzFrame.getX() + mrzFrame.getWidth() / 2f) / (float) previewView.getWidth();
             float cy = (mrzFrame.getY() + mrzFrame.getHeight() / 2f) / (float) previewView.getHeight();
 
-            MeteringPoint afPoint = factory.createPoint(cx * previewView.getWidth(), cy * previewView.getHeight());
+            // Factory expects normalized [0,1] coordinates
+            MeteringPoint afPoint = factory.createPoint(cx, cy);
             FocusMeteringAction action = new FocusMeteringAction.Builder(afPoint,
                     FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE)
                     .setAutoCancelDuration(3, TimeUnit.SECONDS)
@@ -557,6 +565,8 @@ public class MainActivity extends AppCompatActivity {
             boolean hasFlash = cameraInfo.hasFlashUnit();
             torchToggle.setVisibility(hasFlash ? View.VISIBLE : View.GONE);
         }
+        // initial visual state
+        torchToggle.setBackgroundColor(0x66FFFFFF);
     }
 
     private boolean torchOn = false;
@@ -566,8 +576,20 @@ public class MainActivity extends AppCompatActivity {
         try {
             torchOn = !torchOn;
             cameraControl.enableTorch(torchOn);
+            // simple visual feedback
+            torchToggle.setBackgroundColor(torchOn ? 0xFFFFC107 : 0x66FFFFFF);
         } catch (Throwable t) {
             Log.w("MRZ", "Torch toggle failed: " + t.getMessage());
         }
     }
+
+    // Repeat focus/metering at interval while scanning
+    private final Runnable focusRepeater = new Runnable() {
+        @Override public void run() {
+            if (isScanning) {
+                updateFocusMetering();
+                if (previewView != null) previewView.postDelayed(this, 2000);
+            }
+        }
+    };
 }
