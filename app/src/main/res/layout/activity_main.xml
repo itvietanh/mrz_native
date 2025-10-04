@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="utf-8"?>
+<androidx.constraintlayout.widget.ConstraintLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/black"
+    tools:context=".MainActivity">
+
+    <!-- 1. PreviewView: Hiển thị luồng camera, chiếm toàn bộ màn hình -->
+    <androidx.camera.view.PreviewView
+        android:id="@+id/previewView"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintTop_toTopOf="parent" />
+
+    <!-- 2. MRZ Guide Frame: Khung hình overlay để hướng dẫn người dùng -->
+    <!-- Sử dụng View với drawable mrz_frame làm nền. Vị trí 75% chiều cao màn hình. -->
+    <View
+        android:id="@+id/mrz_guide_frame"
+        android:layout_width="0dp"
+        android:layout_height="60dp"
+        android:background="@drawable/mrz_frame"
+        app:layout_constraintVertical_bias="0.75"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintBottom_toBottomOf="parent"
+        app:layout_constraintWidth_percent="0.9" />
+
+    <!-- 3. Status Text / Kết quả: Hiển thị trạng thái quét -->
+    <TextView
+        android:id="@+id/statusText"
+        android:layout_width="0dp"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="32dp"
+        android:gravity="center"
+        android:padding="12dp"
+        android:text="Đặt MRZ của hộ chiếu vào khung màu vàng"
+        android:textColor="@android:color/white"
+        android:textSize="16sp"
+        android:textStyle="bold"
+        android:background="#99000000"
+        app:layout_constraintTop_toBottomOf="@id/mrz_guide_frame"
+        app:layout_constraintStart_toStartOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        app:layout_constraintWidth_percent="0.9"/>
+
+</androidx.constraintlayout.widget.ConstraintLayout>
