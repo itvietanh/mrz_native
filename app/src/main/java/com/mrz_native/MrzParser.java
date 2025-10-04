@@ -131,6 +131,46 @@ public class MrzParser {
     }
 
     /**
+     * TD3 relaxed: accept when core checks pass (docNumber, dob, expiry). Useful to tolerate OCR noise.
+     */
+    public static ParsedMrz parseTD3Relaxed(String l1, String l2) {
+        if (l1 == null || l2 == null) return null;
+        l1 = padRight(l1.toUpperCase(), 44);
+        l2 = padRight(l2.toUpperCase(), 44);
+        try {
+            String documentType = l1.substring(0, 2);
+            String issuingCountry = l1.substring(2, 5);
+            String[] names = l1.substring(5, 44).split("<<");
+            String surname = names.length > 0 ? names[0].replace('<', ' ').trim() : "";
+            String givenNames = names.length > 1 ? names[1].replace('<', ' ').trim() : "";
+            String fullName = (surname + " " + givenNames).trim();
+
+            String docNumberField = l2.substring(0, 9);
+            char docNumberCheck = l2.charAt(9);
+            String nationality = l2.substring(10, 13);
+            String dob = l2.substring(13, 19);
+            char dobCheck = l2.charAt(19);
+            String gender = l2.substring(20, 21);
+            String expiryDate = l2.substring(21, 27);
+            char expiryCheck = l2.charAt(27);
+            String personalNumberField = l2.substring(28, 42);
+
+            boolean c1 = isCheckDigitValid(docNumberField, docNumberCheck);
+            boolean c2 = isCheckDigitValid(dob, dobCheck) && isValidYYMMDD(dob);
+            boolean c3 = isCheckDigitValid(expiryDate, expiryCheck) && isValidYYMMDD(expiryDate);
+            if (!(c1 && c2 && c3)) return null;
+
+            String documentNumber = docNumberField.replace("<", "");
+            String personalNumber = personalNumberField.replace("<", "");
+
+            return new ParsedMrz(documentType, issuingCountry, fullName, documentNumber,
+                    nationality, dob, gender, expiryDate, personalNumber);
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /**
      * ---------------------------
      * MRZ TYPE TD2 - Visa (2 lines, 36 chars)
      * ---------------------------

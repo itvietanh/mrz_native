@@ -113,7 +113,7 @@ public class MainActivity extends AppCompatActivity {
 
                 ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                        .setTargetResolution(new Size(1280, 720))
+                        .setTargetResolution(new Size(1920, 1080))
                         .build();
 
                 imageAnalysis.setAnalyzer(cameraExecutor, imageProxy -> {
@@ -211,7 +211,9 @@ public class MainActivity extends AppCompatActivity {
                 if (norm.isEmpty()) continue;
                 Rect bb = line.getBoundingBox();
                 float cy = bb != null ? (bb.centerY()) : 0f;
-                lines.add(new OcrLine(raw, norm, cy));
+                float left = bb != null ? bb.left : 0f;
+                float h = bb != null ? (bb.height()) : 0f;
+                lines.add(new OcrLine(raw, norm, cy, left, h));
             }
         }
 
@@ -224,15 +226,15 @@ public class MainActivity extends AppCompatActivity {
         // Sắp xếp theo vị trí dọc để tăng khả năng gom đúng dòng MRZ
         Collections.sort(lines, Comparator.comparingDouble(l -> l.centerY));
 
-        // Thử tìm MRZ theo nhiều cách: TD3 (2x44), TD2 (2x36), TD1 (3x30)
-        ParsedMrz parsed = findAndParseMrz(lines);
+        // Chỉ tập trung hộ chiếu TD3 trước (2x44)
+        ParsedMrz parsed = findAndParseMrzTD3Only(lines);
         if (parsed != null) {
             onCandidateDetected(parsed, false);
             return;
         }
 
         // Nếu không parse được trực tiếp, thử các heuristic corrections
-        ParsedMrz corrected = tryHeuristicCorrectionsMultiple(lines);
+        ParsedMrz corrected = tryHeuristicCorrectionsTD3(lines);
         if (corrected != null) {
             onCandidateDetected(corrected, true);
             return;
@@ -275,39 +277,14 @@ public class MainActivity extends AppCompatActivity {
         return a.equals(b);
     }
 
-    private ParsedMrz findAndParseMrz(List<OcrLine> lines) {
-        // Tạo danh sách chỉ chứa text chuẩn
-        List<String> norms = new ArrayList<>();
-        for (OcrLine l : lines) {
-            String n = l.norm;
-            // bộ lọc nhanh: bỏ các dòng quá ngắn hoặc không có '<' (MRZ tiêu chuẩn có nhiều '<')
-            if (n.length() < 10) continue;
-            norms.add(n);
-        }
-
-        // Thử tìm TD1 (3 dòng x ~30)
-        for (int i = 0; i + 2 < norms.size(); i++) {
-            String a = norms.get(i);
-            String b = norms.get(i + 1);
-            String c = norms.get(i + 2);
-            if (looksLikeMrzLine(a) && looksLikeMrzLine(b) && looksLikeMrzLine(c)
-                    && isLengthApprox(a, 30) && isLengthApprox(b, 30) && isLengthApprox(c, 30)) {
-                String l1 = padToLength(a, 30);
-                String l2 = padToLength(b, 30);
-                String l3 = padToLength(c, 30);
-                try {
-                    ParsedMrz p = MrzParser.parseTD1(l1, l2, l3);
-                    if (p != null) return p;
-                } catch (Exception ex) {
-                    // ignore
-                }
-            }
-        }
+    private ParsedMrz findAndParseMrzTD3Only(List<OcrLine> lines) {
+        // Gom dòng theo hàng (cùng baseline), ghép từ trái sang phải
+        List<String> rowCandidates = buildRowCandidates(lines);
 
         // Thử tìm TD3 (2 dòng x ~44) và TD2 (2 dòng x ~36)
-        for (int i = 0; i + 1 < norms.size(); i++) {
-            String a = norms.get(i);
-            String b = norms.get(i + 1);
+        for (int i = 0; i + 1 < rowCandidates.size(); i++) {
+            String a = rowCandidates.get(i);
+            String b = rowCandidates.get(i + 1);
 
             // TD3 candidate (pad to 44)
             if ((isLengthApprox(a, 44) || isLengthApprox(b, 44) || (a.startsWith("P") || a.startsWith("V")))
@@ -318,26 +295,40 @@ public class MainActivity extends AppCompatActivity {
                     ParsedMrz p = MrzParser.parseTD3(l1, l2);
                     if (p != null) return p;
                 } catch (Exception ex) { }
-            }
-
-            // TD2 candidate (pad to 36)
-            if ((isLengthApprox(a, 36) || isLengthApprox(b, 36))
-                    && looksLikeMrzLine(a) && looksLikeMrzLine(b)) {
-                String l1 = padToLength(a, 36);
-                String l2 = padToLength(b, 36);
                 try {
-                    ParsedMrz p = MrzParser.parseTD2(l1, l2);
-                    if (p != null) return p;
+                    ParsedMrz p2 = MrzParser.parseTD3Relaxed(l1, l2);
+                    if (p2 != null) return p2;
+                } catch (Exception ex) { }
+                // thử đảo dòng phòng OCR đảo thứ tự
+                try {
+                    ParsedMrz p3 = MrzParser.parseTD3(padToLength(b, 44), padToLength(a, 44));
+                    if (p3 != null) return p3;
+                } catch (Exception ex) { }
+                try {
+                    ParsedMrz p4 = MrzParser.parseTD3Relaxed(padToLength(b, 44), padToLength(a, 44));
+                    if (p4 != null) return p4;
                 } catch (Exception ex) { }
             }
 
             // Fallback: try pad 44 even if slightly shorter (some OCR trim)
-            if (a.length() >= 20 && b.length() >= 20 && looksLikeMrzLine(a) && looksLikeMrzLine(b)) {
+            if (a.length() >= 18 && b.length() >= 18 && looksLikeMrzLine(a) && looksLikeMrzLine(b)) {
                 String l1 = padToLength(a, 44);
                 String l2 = padToLength(b, 44);
                 try {
                     ParsedMrz p = MrzParser.parseTD3(l1, l2);
                     if (p != null) return p;
+                } catch (Exception ex) { }
+                try {
+                    ParsedMrz p2 = MrzParser.parseTD3Relaxed(l1, l2);
+                    if (p2 != null) return p2;
+                } catch (Exception ex) { }
+                try {
+                    ParsedMrz p3 = MrzParser.parseTD3(padToLength(b, 44), padToLength(a, 44));
+                    if (p3 != null) return p3;
+                } catch (Exception ex) { }
+                try {
+                    ParsedMrz p4 = MrzParser.parseTD3Relaxed(padToLength(b, 44), padToLength(a, 44));
+                    if (p4 != null) return p4;
                 } catch (Exception ex) { }
             }
         }
@@ -372,7 +363,7 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- Heuristic corrections (mạnh hơn) ----------
     // Thử nhiều mapping khác nhau và cả tổ hợp 2 mapping
-    private ParsedMrz tryHeuristicCorrectionsMultiple(List<OcrLine> lines) {
+    private ParsedMrz tryHeuristicCorrectionsTD3(List<OcrLine> lines) {
         // chuẩn danh sách norms
         List<String> norms = new ArrayList<>();
         for (OcrLine l : lines) norms.add(l.norm);
@@ -386,7 +377,7 @@ public class MainActivity extends AppCompatActivity {
         // thử 1 map
         for (char[] m : maps) {
             List<String> mapped = applyMapToList(norms, m[0], m[1]);
-            ParsedMrz p = findAndParseMrzStrings(mapped);
+            ParsedMrz p = findAndParseMrzStringsTD3(mapped);
             if (p != null) {
                 Log.d("MRZ_CORRECTION", "Single map corrected: " + m[0] + "->" + m[1]);
                 return p;
@@ -398,7 +389,7 @@ public class MainActivity extends AppCompatActivity {
             for (int j = i + 1; j < maps.length && j < i + 6; j++) {
                 List<String> mapped = applyMapToList(norms, maps[i][0], maps[i][1]);
                 mapped = applyMapToList(mapped, maps[j][0], maps[j][1]);
-                ParsedMrz p = findAndParseMrzStrings(mapped);
+                ParsedMrz p = findAndParseMrzStringsTD3(mapped);
                 if (p != null) {
                     Log.d("MRZ_CORRECTION", "Double map corrected: " + maps[i][0] + "->" + maps[i][1] + "," + maps[j][0] + "->" + maps[j][1]);
                     return p;
@@ -412,7 +403,7 @@ public class MainActivity extends AppCompatActivity {
         for (String s : norms) {
             aggressive.add(aggressiveMap(s));
         }
-        ParsedMrz p = findAndParseMrzStrings(aggressive);
+        ParsedMrz p = findAndParseMrzStringsTD3(aggressive);
         if (p != null) {
             Log.d("MRZ_CORRECTION", "Aggressive mapping worked");
             return p;
@@ -421,11 +412,11 @@ public class MainActivity extends AppCompatActivity {
         return null;
     }
 
-    private ParsedMrz findAndParseMrzStrings(List<String> norms) {
-        // chuyển về dạng OcrLine tạm để tận dụng findAndParseMrz
+    private ParsedMrz findAndParseMrzStringsTD3(List<String> norms) {
+        // chuyển về dạng OcrLine tạm để tận dụng findAndParseMrzTD3Only
         List<OcrLine> tmp = new ArrayList<>();
-        for (String s : norms) tmp.add(new OcrLine(s, s));
-        return findAndParseMrz(tmp);
+        for (String s : norms) tmp.add(new OcrLine(s, s, 0));
+        return findAndParseMrzTD3Only(tmp);
     }
 
     private List<String> applyMapToList(List<String> src, char from, char to) {
@@ -451,6 +442,53 @@ public class MainActivity extends AppCompatActivity {
                 .replace('S','5').replace('B','8').replace('G','6')
                 .replace('T','7');
         return s;
+    }
+
+    // Gom các dòng OCR thành 2 hàng MRZ: dùng trung vị Y, ghép từ trái sang phải
+    private List<String> buildRowCandidates(List<OcrLine> lines) {
+        if (lines == null || lines.isEmpty()) return new ArrayList<>();
+        // chỉ giữ các dòng có đủ độ dài hoặc chứa nhiều '<'
+        List<OcrLine> candidates = new ArrayList<>();
+        for (OcrLine l : lines) {
+            if (l.norm.length() >= 12 || looksLikeMrzLine(l.norm)) {
+                candidates.add(l);
+            }
+        }
+        if (candidates.isEmpty()) return new ArrayList<>();
+
+        // sắp theo Y
+        Collections.sort(candidates, Comparator.comparingDouble(o -> o.centerY));
+        // tính khoảng cách giữa các dòng liên tiếp theo Y để phân 2 cụm
+        if (candidates.size() <= 2) {
+            // ghép thẳng từng dòng theo left
+            Collections.sort(candidates, Comparator.comparingDouble(o -> o.left));
+            List<String> r = new ArrayList<>();
+            for (OcrLine l : candidates) r.add(l.norm);
+            return r;
+        }
+
+        // tìm ngưỡng phân cụm theo Y: khoảng trống lớn nhất
+        int splitIdx = -1;
+        float maxGap = -1f;
+        for (int i = 0; i < candidates.size() - 1; i++) {
+            float gap = candidates.get(i + 1).centerY - candidates.get(i).centerY;
+            if (gap > maxGap) { maxGap = gap; splitIdx = i; }
+        }
+
+        List<OcrLine> top = new ArrayList<>(candidates.subList(0, splitIdx + 1));
+        List<OcrLine> bottom = new ArrayList<>(candidates.subList(splitIdx + 1, candidates.size()));
+        Collections.sort(top, Comparator.comparingDouble(o -> o.left));
+        Collections.sort(bottom, Comparator.comparingDouble(o -> o.left));
+
+        StringBuilder row1 = new StringBuilder();
+        for (OcrLine l : top) row1.append(l.norm);
+        StringBuilder row2 = new StringBuilder();
+        for (OcrLine l : bottom) row2.append(l.norm);
+
+        List<String> out = new ArrayList<>();
+        out.add(row1.toString());
+        out.add(row2.toString());
+        return out;
     }
 
     // ---------- UI helpers ----------
@@ -511,7 +549,11 @@ public class MainActivity extends AppCompatActivity {
         public final String raw;
         public final String norm;
         public final float centerY;
-        public OcrLine(String raw, String norm, float centerY) { this.raw = raw; this.norm = norm; this.centerY = centerY; }
+        public final float left;
+        public final float height;
+        public OcrLine(String raw, String norm, float centerY, float left, float height) {
+            this.raw = raw; this.norm = norm; this.centerY = centerY; this.left = left; this.height = height;
+        }
     }
 
     private static class Pair<F,S> {
