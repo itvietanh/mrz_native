@@ -70,7 +70,7 @@ public class MainActivity extends AppCompatActivity {
     private Camera camera;
     private CameraControl cameraControl;
     private CameraInfo cameraInfo;
-    private boolean enableRoiCrop = false; // keep off unless mapping is fully verified
+    private boolean enableRoiCrop = true;  // crop camera frames to MRZ guide region
     private boolean restrictToRoi = true;  // filter OCR lines to the overlay region
 
     // Keep last known image rotation and rotated dimensions for ROI mapping
@@ -208,8 +208,10 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- main MRZ handling ----------
     private void handleVisionText(Text visionText) {
-        // Tính ROI trong hệ toạ độ ảnh đã xoay (phù hợp với bounding boxes MLKit)
-        Rect roiRotated = computeRoiRectInRotatedSpace();
+        // Nếu đã crop ảnh đầu vào theo ROI, coi như tất cả dòng đều nằm trong ROI
+        final boolean croppingActive = enableRoiCrop;
+        // Chỉ tính ROI để lọc khi KHÔNG crop ở đầu vào
+        Rect roiRotated = croppingActive ? null : computeRoiRectInRotatedSpace();
 
         // Thu thập các dòng và phân loại theo ROI
         List<OcrLine> inside = new ArrayList<>();
@@ -223,9 +225,9 @@ public class MainActivity extends AppCompatActivity {
                 String norm = normalizeLine(raw);
                 if (norm.isEmpty()) continue;
                 Rect bb = line.getBoundingBox();
-                boolean in = false;
+                boolean in = croppingActive; // khi crop, mọi dòng đều nằm trong ROI đã cắt
                 float cy = 0f;
-                if (bb != null) {
+                if (!croppingActive && bb != null) {
                     int cx = bb.centerX();
                     int cY = bb.centerY();
                     cy = cY;
