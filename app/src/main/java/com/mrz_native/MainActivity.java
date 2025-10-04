@@ -57,6 +57,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int REQUIRED_STABLE_HITS = 2; // frames to confirm
     private PreviewView previewView;
     private TextView statusText;
+    private TextView ocrDebugText;
     private View mrzFrame;
     private View torchToggle; // will be ToggleButton
     private ExecutorService cameraExecutor;
@@ -70,6 +71,12 @@ public class MainActivity extends AppCompatActivity {
     private CameraControl cameraControl;
     private CameraInfo cameraInfo;
     private boolean enableRoiCrop = false; // keep off unless mapping is fully verified
+    private boolean restrictToRoi = true;  // filter OCR lines to the overlay region
+
+    // Keep last known image rotation and rotated dimensions for ROI mapping
+    private volatile int lastRotationDegrees = 0;
+    private volatile int lastRotatedW = 0;
+    private volatile int lastRotatedH = 0;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -78,10 +85,20 @@ public class MainActivity extends AppCompatActivity {
         // Keep screen on during scanning session
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         previewView = findViewById(R.id.previewView);
+        // Ensure mapping math matches how the camera is rendered on screen
+        previewView.setScaleType(PreviewView.ScaleType.FIT_CENTER);
         statusText = findViewById(R.id.statusText);
+        ocrDebugText = findViewById(R.id.ocrDebugText);
         mrzFrame = findViewById(R.id.mrz_guide_frame);
         torchToggle = findViewById(R.id.torchToggle);
         cameraExecutor = Executors.newSingleThreadExecutor();
+
+        if (ocrDebugText != null) {
+            // Allow scrolling through debug lines if many
+            try {
+                ocrDebugText.setMovementMethod(android.text.method.ScrollingMovementMethod.getInstance());
+            } catch (Throwable ignore) {}
+        }
 
         if (allPermissionsGranted()) {
             startCamera();
@@ -155,37 +172,22 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        // Cache rotation and rotated dimensions for consistent ROI mapping later
+        lastRotationDegrees = imageProxy.getImageInfo().getRotationDegrees();
+        int imgW = imageProxy.getWidth();
+        int imgH = imageProxy.getHeight();
+        if (lastRotationDegrees % 180 == 0) {
+            lastRotatedW = imgW;
+            lastRotatedH = imgH;
+        } else {
+            lastRotatedW = imgH;
+            lastRotatedH = imgW;
+        }
+
         // Optional: crop to MRZ guide region when mapping is verified
         if (enableRoiCrop) {
-            float previewWidth = previewView.getWidth();
-            float previewHeight = previewView.getHeight();
-            if (previewWidth > 0 && previewHeight > 0) {
-                View overlay = mrzFrame;
-                float frameLeft = overlay.getX();
-                float frameTop = overlay.getY();
-                float frameWidth = overlay.getWidth();
-                float frameHeight = overlay.getHeight();
-
-                int imageWidth = imageProxy.getWidth();
-                int imageHeight = imageProxy.getHeight();
-                float scaleX = (float) imageWidth / previewWidth;
-                float scaleY = (float) imageHeight / previewHeight;
-
-                int cropLeft = (int) (frameLeft * scaleX);
-                int cropTop = (int) (frameTop * scaleY);
-                int cropRight = (int) ((frameLeft + frameWidth) * scaleX);
-                int cropBottom = (int) ((frameTop + frameHeight) * scaleY);
-
-                cropLeft = Math.max(0, cropLeft);
-                cropTop = Math.max(0, cropTop);
-                cropRight = Math.min(imageWidth, cropRight);
-                cropBottom = Math.min(imageHeight, cropBottom);
-
-                if (cropRight > cropLeft && cropBottom > cropTop) {
-                    Rect cropRect = new Rect(cropLeft, cropTop, cropRight, cropBottom);
-                    imageProxy.setCropRect(cropRect);
-                }
-            }
+            Rect cropRect = computeCropRectForImageProxy(imageProxy);
+            if (cropRect != null) imageProxy.setCropRect(cropRect);
         }
 
         InputImage inputImage = InputImage.fromMediaImage(imageProxy.getImage(), imageProxy.getImageInfo().getRotationDegrees());
@@ -206,8 +208,14 @@ public class MainActivity extends AppCompatActivity {
 
     // ---------- main MRZ handling ----------
     private void handleVisionText(Text visionText) {
-        // Thu thập các dòng, chuẩn hoá nhẹ
-        List<OcrLine> lines = new ArrayList<>();
+        // Tính ROI trong hệ toạ độ ảnh đã xoay (phù hợp với bounding boxes MLKit)
+        Rect roiRotated = computeRoiRectInRotatedSpace();
+
+        // Thu thập các dòng và phân loại theo ROI
+        List<OcrLine> inside = new ArrayList<>();
+        List<OcrLine> outside = new ArrayList<>();
+        StringBuilder dbg = new StringBuilder();
+
         for (Text.TextBlock block : visionText.getTextBlocks()) {
             for (Text.Line line : block.getLines()) {
                 String raw = line.getText();
@@ -215,29 +223,53 @@ public class MainActivity extends AppCompatActivity {
                 String norm = normalizeLine(raw);
                 if (norm.isEmpty()) continue;
                 Rect bb = line.getBoundingBox();
-                float cy = bb != null ? (bb.centerY()) : 0f;
-                lines.add(new OcrLine(raw, norm, cy));
+                boolean in = false;
+                float cy = 0f;
+                if (bb != null) {
+                    int cx = bb.centerX();
+                    int cY = bb.centerY();
+                    cy = cY;
+                    if (roiRotated != null) {
+                        in = roiRotated.contains(cx, cY);
+                    }
+                }
+                if (!restrictToRoi) in = true; // bypass filter if disabled
+
+                if (in) {
+                    inside.add(new OcrLine(raw, norm, cy));
+                    if (dbg.length() < 2000) dbg.append("[IN]  ").append(raw).append('\n');
+                } else {
+                    outside.add(new OcrLine(raw, norm, cy));
+                    if (dbg.length() < 2000) dbg.append("[OUT] ").append(raw).append('\n');
+                }
             }
         }
 
-        // Nếu không có gì thì thông báo
-        if (lines.isEmpty()) {
-            showMessageOnUi("Đặt MRZ của hộ chiếu vào khung màu vàng", null);
+        // Hiển thị debug text để kiểm tra có đọc ngoài vùng không
+        if (ocrDebugText != null) {
+            final String dbgText = dbg.length() == 0 ? "(Không có văn bản)" : dbg.toString();
+            runOnUiThread(() -> ocrDebugText.setText(dbgText));
+        }
+
+        List<OcrLine> linesForMrz = restrictToRoi ? inside : mergeInsideFirst(inside, outside);
+
+        if (linesForMrz.isEmpty()) {
+            showMessageOnUi("Đưa vùng MRZ vào khung vàng", null);
             return;
         }
 
         // Sắp xếp theo vị trí dọc để tăng khả năng gom đúng dòng MRZ
-        Collections.sort(lines, Comparator.comparingDouble(l -> l.centerY));
+        Collections.sort(linesForMrz, Comparator.comparingDouble(l -> l.centerY));
 
         // Thử tìm MRZ theo nhiều cách: TD3 (2x44), TD2 (2x36), TD1 (3x30)
-        ParsedMrz parsed = findAndParseMrz(lines);
+        ParsedMrz parsed = findAndParseMrz(linesForMrz);
         if (parsed != null) {
             onCandidateDetected(parsed, false);
             return;
         }
 
         // Nếu không parse được trực tiếp, thử các heuristic corrections
-        ParsedMrz corrected = tryHeuristicCorrectionsMultiple(lines);
+        ParsedMrz corrected = tryHeuristicCorrectionsMultiple(linesForMrz);
         if (corrected != null) {
             onCandidateDetected(corrected, true);
             return;
@@ -246,6 +278,137 @@ public class MainActivity extends AppCompatActivity {
         // Không tìm được
         showMessageOnUi("Đặt MRZ của hộ chiếu vào khung màu vàng", null);
     }
+
+    private List<OcrLine> mergeInsideFirst(List<OcrLine> inside, List<OcrLine> outside) {
+        List<OcrLine> out = new ArrayList<>(inside.size() + outside.size());
+        out.addAll(inside);
+        out.addAll(outside);
+        return out;
+    }
+
+    // Tính cropRect của ảnh gốc (chưa xoay) từ ROI trên màn hình
+    private Rect computeCropRectForImageProxy(ImageProxy imageProxy) {
+        if (previewView.getWidth() == 0 || previewView.getHeight() == 0) return null;
+        int rotation = imageProxy.getImageInfo().getRotationDegrees();
+        int imgW = imageProxy.getWidth();
+        int imgH = imageProxy.getHeight();
+
+        // Kích thước ảnh sau khi xoay
+        int rotW = (rotation % 180 == 0) ? imgW : imgH;
+        int rotH = (rotation % 180 == 0) ? imgH : imgW;
+
+        // Tính ROI trong không gian đã xoay (khớp với hiển thị)
+        Rect roiRot = computeRoiRectInRotatedSpace(rotW, rotH);
+        if (roiRot == null) return null;
+
+        // Chuyển ROI từ toạ độ đã xoay về toạ độ ảnh gốc trước xoay
+        Rect roiRaw = mapRotatedRectToRawImage(roiRot, imgW, imgH, rotation);
+        // Đảm bảo nằm trong ảnh
+        roiRaw.left = clamp(roiRaw.left, 0, imgW);
+        roiRaw.top = clamp(roiRaw.top, 0, imgH);
+        roiRaw.right = clamp(roiRaw.right, 0, imgW);
+        roiRaw.bottom = clamp(roiRaw.bottom, 0, imgH);
+        if (roiRaw.right <= roiRaw.left || roiRaw.bottom <= roiRaw.top) return null;
+        return roiRaw;
+    }
+
+    // Tính ROI trong hệ ảnh đã xoay dựa trên kích thước cuối cùng hiển thị trong PreviewView (fitCenter)
+    private Rect computeRoiRectInRotatedSpace() {
+        if (lastRotatedW <= 0 || lastRotatedH <= 0) return null;
+        return computeRoiRectInRotatedSpace(lastRotatedW, lastRotatedH);
+    }
+
+    private Rect computeRoiRectInRotatedSpace(int rotW, int rotH) {
+        int viewW = previewView.getWidth();
+        int viewH = previewView.getHeight();
+        if (viewW == 0 || viewH == 0) return null;
+
+        // FitCenter: tính kích thước ảnh hiển thị trong view và offset letterbox
+        float imgAspect = (float) rotW / (float) rotH;
+        float viewAspect = (float) viewW / (float) viewH;
+        float scaledW, scaledH;
+        if (imgAspect > viewAspect) {
+            scaledW = viewW;
+            scaledH = viewW / imgAspect;
+        } else {
+            scaledH = viewH;
+            scaledW = viewH * imgAspect;
+        }
+        float offsetX = (viewW - scaledW) / 2f;
+        float offsetY = (viewH - scaledH) / 2f;
+
+        // Toạ độ ROI trên view
+        float frameLeft = mrzFrame.getX();
+        float frameTop = mrzFrame.getY();
+        float frameRight = frameLeft + mrzFrame.getWidth();
+        float frameBottom = frameTop + mrzFrame.getHeight();
+
+        // Quy đổi về [0,1] trong không gian ảnh đã fit vào view
+        float leftN = (frameLeft - offsetX) / scaledW;
+        float topN = (frameTop - offsetY) / scaledH;
+        float rightN = (frameRight - offsetX) / scaledW;
+        float bottomN = (frameBottom - offsetY) / scaledH;
+
+        // Clamp
+        leftN = clamp(leftN, 0f, 1f);
+        topN = clamp(topN, 0f, 1f);
+        rightN = clamp(rightN, 0f, 1f);
+        bottomN = clamp(bottomN, 0f, 1f);
+
+        int L = Math.round(leftN * rotW);
+        int T = Math.round(topN * rotH);
+        int R = Math.round(rightN * rotW);
+        int B = Math.round(bottomN * rotH);
+        if (R <= L || B <= T) return null;
+        return new Rect(L, T, R, B);
+    }
+
+    // Chuyển rect từ toạ độ đã xoay về toạ độ gốc (trước xoay)
+    private Rect mapRotatedRectToRawImage(Rect rotRect, int rawW, int rawH, int rotationDegrees) {
+        // map 4 góc rồi lấy bound
+        float[][] corners = new float[][]{
+                {rotRect.left, rotRect.top},
+                {rotRect.right, rotRect.top},
+                {rotRect.right, rotRect.bottom},
+                {rotRect.left, rotRect.bottom}
+        };
+
+        float minX = Float.MAX_VALUE, minY = Float.MAX_VALUE;
+        float maxX = -Float.MAX_VALUE, maxY = -Float.MAX_VALUE;
+        for (float[] c : corners) {
+            float vx = c[0] / (float) (rotationDegrees % 180 == 0 ? rawW : rawH); // normalized in rotated space width
+            float vy = c[1] / (float) (rotationDegrees % 180 == 0 ? rawH : rawW); // normalized in rotated space height
+            float[] raw = mapViewNormToRawNorm(vx, vy, rotationDegrees);
+            float rx = raw[0] * rawW;
+            float ry = raw[1] * rawH;
+            if (rx < minX) minX = rx;
+            if (ry < minY) minY = ry;
+            if (rx > maxX) maxX = rx;
+            if (ry > maxY) maxY = ry;
+        }
+        return new Rect(Math.round(minX), Math.round(minY), Math.round(maxX), Math.round(maxY));
+    }
+
+    // Ánh xạ toạ độ view chuẩn hoá (sau xoay) -> toạ độ ảnh gốc chuẩn hoá
+    private float[] mapViewNormToRawNorm(float vx, float vy, int rotationDegrees) {
+        switch ((rotationDegrees % 360 + 360) % 360) {
+            case 0:
+                return new float[]{vx, vy};
+            case 90:
+                // ixN = vy; iyN = 1 - vx
+                return new float[]{vy, 1f - vx};
+            case 180:
+                return new float[]{1f - vx, 1f - vy};
+            case 270:
+                // ixN = 1 - vy; iyN = vx
+                return new float[]{1f - vy, vx};
+            default:
+                return new float[]{vx, vy};
+        }
+    }
+
+    private int clamp(int v, int min, int max) { return Math.max(min, Math.min(max, v)); }
+    private float clamp(float v, float min, float max) { return Math.max(min, Math.min(max, v)); }
 
     private String normalizeLine(String raw) {
         // Loại bỏ khoảng trắng, chuyển in hoa, giữ A-Z 0-9 < và một số ký tự thường bị MLkit thêm
