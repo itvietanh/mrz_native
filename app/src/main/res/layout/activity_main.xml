@@ -49,4 +49,16 @@
         app:layout_constraintEnd_toEndOf="parent"
         app:layout_constraintWidth_percent="0.9"/>
 
+    <!-- 4. Torch toggle: simple square tap target in top-right -->
+    <View
+        android:id="@+id/torchToggle"
+        android:layout_width="40dp"
+        android:layout_height="40dp"
+        android:background="#66FFFFFF"
+        app:layout_constraintTop_toTopOf="parent"
+        app:layout_constraintEnd_toEndOf="parent"
+        android:layout_marginTop="16dp"
+        android:layout_marginEnd="16dp"
+        tools:visibility="visible"/>
+
 </androidx.constraintlayout.widget.ConstraintLayout>

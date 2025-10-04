@@ -3,7 +3,9 @@ package com.mrz_native;
 import android.Manifest;
 import android.content.pm.PackageManager;
 import android.graphics.Rect;
+import android.graphics.RectF;
 import android.os.Bundle;
+import android.os.SystemClock;
 import android.util.Log;
 import android.view.View;
 import android.widget.TextView;
@@ -12,39 +14,61 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.annotation.OptIn;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.camera.core.AspectRatio;
+import androidx.camera.core.Camera;
+import androidx.camera.core.CameraControl;
+import androidx.camera.core.CameraInfo;
 import androidx.camera.core.CameraSelector;
 import androidx.camera.core.ExperimentalGetImage;
+import androidx.camera.core.FocusMeteringAction;
 import androidx.camera.core.ImageAnalysis;
 import androidx.camera.core.ImageProxy;
+import androidx.camera.core.MeteringPoint;
+import androidx.camera.core.MeteringPointFactory;
 import androidx.camera.core.Preview;
 import androidx.camera.lifecycle.ProcessCameraProvider;
 import androidx.camera.view.PreviewView;
 import androidx.core.app.ActivityCompat;
 import androidx.core.content.ContextCompat;
 
-import com.mrz_native.MrzParser.ParsedMrz;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.mlkit.vision.common.InputImage;
 import com.google.mlkit.vision.text.Text;
 import com.google.mlkit.vision.text.TextRecognition;
 import com.google.mlkit.vision.text.TextRecognizer;
 import com.google.mlkit.vision.text.latin.TextRecognizerOptions;
+import com.mrz_native.MrzParser.ParsedMrz;
 
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
+import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
+import android.util.Size;
 
 public class MainActivity extends AppCompatActivity {
     private static final int REQ_CODE = 101;
+    private static final long OCR_FRAME_INTERVAL_MS = 120; // throttle OCR
+    private static final int REQUIRED_STABLE_HITS = 2; // frames to confirm
     private PreviewView previewView;
     private TextView statusText;
     private View mrzFrame;
+    private View torchToggle; // will be ToggleButton
     private ExecutorService cameraExecutor;
     private final TextRecognizer recognizer = TextRecognition.getClient(TextRecognizerOptions.DEFAULT_OPTIONS);
     private volatile boolean isScanning = true;
+    private volatile boolean ocrInFlight = false;
+    private volatile long lastOcrTs = 0L;
+    private volatile ParsedMrz lastCandidate = null;
+    private volatile int stableHits = 0;
+    private Camera camera;
+    private CameraControl cameraControl;
+    private CameraInfo cameraInfo;
+    private boolean enableRoiCrop = false; // keep off unless mapping is fully verified
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -53,6 +77,7 @@ public class MainActivity extends AppCompatActivity {
         previewView = findViewById(R.id.previewView);
         statusText = findViewById(R.id.statusText);
         mrzFrame = findViewById(R.id.mrz_guide_frame);
+        torchToggle = findViewById(R.id.torchToggle);
         cameraExecutor = Executors.newSingleThreadExecutor();
 
         if (allPermissionsGranted()) {
@@ -81,24 +106,36 @@ public class MainActivity extends AppCompatActivity {
         cameraProviderFuture.addListener(() -> {
             try {
                 ProcessCameraProvider cameraProvider = cameraProviderFuture.get();
-                Preview preview = new Preview.Builder().build();
+                Preview preview = new Preview.Builder()
+                        .setTargetAspectRatio(AspectRatio.RATIO_16_9)
+                        .build();
                 preview.setSurfaceProvider(previewView.getSurfaceProvider());
 
                 ImageAnalysis imageAnalysis = new ImageAnalysis.Builder()
                         .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                        .setTargetResolution(new Size(1280, 720))
                         .build();
 
                 imageAnalysis.setAnalyzer(cameraExecutor, imageProxy -> {
-                    if (isScanning) {
-                        processImageProxy(imageProxy);
-                    } else {
+                    if (!isScanning) { imageProxy.close(); return; }
+                    long now = SystemClock.uptimeMillis();
+                    if (ocrInFlight || (now - lastOcrTs) < OCR_FRAME_INTERVAL_MS) {
                         imageProxy.close();
+                        return;
                     }
+                    lastOcrTs = now;
+                    processImageProxy(imageProxy);
                 });
 
                 CameraSelector cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA;
                 cameraProvider.unbindAll();
-                cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
+                camera = cameraProvider.bindToLifecycle(this, cameraSelector, preview, imageAnalysis);
+                cameraControl = camera.getCameraControl();
+                cameraInfo = camera.getCameraInfo();
+
+                setupTorchUi();
+                // Kick an initial focus/metering on MRZ guide
+                previewView.post(this::updateFocusMetering);
             } catch (ExecutionException | InterruptedException e) {
                 Log.e("MRZ", "Lỗi khởi tạo camera", e);
             }
@@ -113,56 +150,51 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
-        // Lấy kích thước preview thực tế và frame
-        float previewWidth = previewView.getWidth();
-        float previewHeight = previewView.getHeight();
+        // Optional: crop to MRZ guide region when mapping is verified
+        if (enableRoiCrop) {
+            float previewWidth = previewView.getWidth();
+            float previewHeight = previewView.getHeight();
+            if (previewWidth > 0 && previewHeight > 0) {
+                View overlay = mrzFrame;
+                float frameLeft = overlay.getX();
+                float frameTop = overlay.getY();
+                float frameWidth = overlay.getWidth();
+                float frameHeight = overlay.getHeight();
 
-        // Nếu preview chưa layout xong thì skip
-        if (previewWidth == 0 || previewHeight == 0) {
-            imageProxy.close();
-            return;
+                int imageWidth = imageProxy.getWidth();
+                int imageHeight = imageProxy.getHeight();
+                float scaleX = (float) imageWidth / previewWidth;
+                float scaleY = (float) imageHeight / previewHeight;
+
+                int cropLeft = (int) (frameLeft * scaleX);
+                int cropTop = (int) (frameTop * scaleY);
+                int cropRight = (int) ((frameLeft + frameWidth) * scaleX);
+                int cropBottom = (int) ((frameTop + frameHeight) * scaleY);
+
+                cropLeft = Math.max(0, cropLeft);
+                cropTop = Math.max(0, cropTop);
+                cropRight = Math.min(imageWidth, cropRight);
+                cropBottom = Math.min(imageHeight, cropBottom);
+
+                if (cropRight > cropLeft && cropBottom > cropTop) {
+                    Rect cropRect = new Rect(cropLeft, cropTop, cropRight, cropBottom);
+                    imageProxy.setCropRect(cropRect);
+                }
+            }
         }
-
-        View overlay = findViewById(R.id.mrz_guide_frame);
-
-        // Tính tọa độ khung vàng trên preview (theo pixel)
-        float frameLeft = overlay.getX();
-        float frameTop = overlay.getY();
-        float frameWidth = overlay.getWidth();
-        float frameHeight = overlay.getHeight();
-
-        // Chuyển đổi sang tọa độ của image gốc
-        int imageWidth = imageProxy.getWidth();
-        int imageHeight = imageProxy.getHeight();
-
-        // Tỷ lệ giữa image và preview
-        float scaleX = (float) imageWidth / previewWidth;
-        float scaleY = (float) imageHeight / previewHeight;
-
-        // Nhân tỷ lệ để ra vùng cần crop
-        int cropLeft = (int) (frameLeft * scaleX);
-        int cropTop = (int) (frameTop * scaleY);
-        int cropRight = (int) ((frameLeft + frameWidth) * scaleX);
-        int cropBottom = (int) ((frameTop + frameHeight) * scaleY);
-
-        // Giới hạn không vượt biên
-        cropLeft = Math.max(0, cropLeft);
-        cropTop = Math.max(0, cropTop);
-        cropRight = Math.min(imageWidth, cropRight);
-        cropBottom = Math.min(imageHeight, cropBottom);
-
-        Rect cropRect = new Rect(cropLeft, cropTop, cropRight, cropBottom);
-        imageProxy.setCropRect(cropRect);
 
         InputImage inputImage = InputImage.fromMediaImage(imageProxy.getImage(), imageProxy.getImageInfo().getRotationDegrees());
 
+        ocrInFlight = true;
         recognizer.process(inputImage)
                 .addOnSuccessListener(visionText -> {
                     if (isScanning) handleVisionText(visionText);
+                    ocrInFlight = false;
                     imageProxy.close();
                 })
                 .addOnFailureListener(e -> {
                     Log.e("MRZ", "ML Kit failed: " + e.getMessage());
+                    ocrInFlight = false;
                     imageProxy.close();
                 });
     }
@@ -177,7 +209,9 @@ public class MainActivity extends AppCompatActivity {
                 if (raw == null) continue;
                 String norm = normalizeLine(raw);
                 if (norm.isEmpty()) continue;
-                lines.add(new OcrLine(raw, norm));
+                Rect bb = line.getBoundingBox();
+                float cy = bb != null ? (bb.centerY()) : 0f;
+                lines.add(new OcrLine(raw, norm, cy));
             }
         }
 
@@ -187,19 +221,20 @@ public class MainActivity extends AppCompatActivity {
             return;
         }
 
+        // Sắp xếp theo vị trí dọc để tăng khả năng gom đúng dòng MRZ
+        Collections.sort(lines, Comparator.comparingDouble(l -> l.centerY));
+
         // Thử tìm MRZ theo nhiều cách: TD3 (2x44), TD2 (2x36), TD1 (3x30)
         ParsedMrz parsed = findAndParseMrz(lines);
         if (parsed != null) {
-            isScanning = false;
-            onMrzSuccess(parsed);
+            onCandidateDetected(parsed, false);
             return;
         }
 
         // Nếu không parse được trực tiếp, thử các heuristic corrections
         ParsedMrz corrected = tryHeuristicCorrectionsMultiple(lines);
         if (corrected != null) {
-            isScanning = false;
-            onMrzCorrected(corrected);
+            onCandidateDetected(corrected, true);
             return;
         }
 
@@ -214,17 +249,49 @@ public class MainActivity extends AppCompatActivity {
         return t;
     }
 
+    private void onCandidateDetected(ParsedMrz candidate, boolean corrected) {
+        if (candidate == null) return;
+        if (lastCandidate != null &&
+                safeEquals(lastCandidate.documentNumber, candidate.documentNumber) &&
+                safeEquals(lastCandidate.name, candidate.name) &&
+                safeEquals(lastCandidate.expiryDate, candidate.expiryDate)) {
+            stableHits++;
+        } else {
+            lastCandidate = candidate;
+            stableHits = 1;
+        }
+
+        if (stableHits >= REQUIRED_STABLE_HITS) {
+            isScanning = false;
+            if (corrected) onMrzCorrected(candidate); else onMrzSuccess(candidate);
+        } else {
+            showMessageOnUi("Đang ổn định MRZ... (" + stableHits + "/" + REQUIRED_STABLE_HITS + ")", null);
+        }
+    }
+
+    private boolean safeEquals(String a, String b) {
+        if (a == null && b == null) return true;
+        if (a == null || b == null) return false;
+        return a.equals(b);
+    }
+
     private ParsedMrz findAndParseMrz(List<OcrLine> lines) {
         // Tạo danh sách chỉ chứa text chuẩn
         List<String> norms = new ArrayList<>();
-        for (OcrLine l : lines) norms.add(l.norm);
+        for (OcrLine l : lines) {
+            String n = l.norm;
+            // bộ lọc nhanh: bỏ các dòng quá ngắn hoặc không có '<' (MRZ tiêu chuẩn có nhiều '<')
+            if (n.length() < 10) continue;
+            norms.add(n);
+        }
 
         // Thử tìm TD1 (3 dòng x ~30)
         for (int i = 0; i + 2 < norms.size(); i++) {
             String a = norms.get(i);
             String b = norms.get(i + 1);
             String c = norms.get(i + 2);
-            if (isLengthApprox(a, 30) && isLengthApprox(b, 30) && isLengthApprox(c, 30)) {
+            if (looksLikeMrzLine(a) && looksLikeMrzLine(b) && looksLikeMrzLine(c)
+                    && isLengthApprox(a, 30) && isLengthApprox(b, 30) && isLengthApprox(c, 30)) {
                 String l1 = padToLength(a, 30);
                 String l2 = padToLength(b, 30);
                 String l3 = padToLength(c, 30);
@@ -243,7 +310,8 @@ public class MainActivity extends AppCompatActivity {
             String b = norms.get(i + 1);
 
             // TD3 candidate (pad to 44)
-            if (isLengthApprox(a, 44) || isLengthApprox(b, 44) || (a.startsWith("P") || a.startsWith("V"))) {
+            if ((isLengthApprox(a, 44) || isLengthApprox(b, 44) || (a.startsWith("P") || a.startsWith("V")))
+                    && looksLikeMrzLine(a) && looksLikeMrzLine(b)) {
                 String l1 = padToLength(a, 44);
                 String l2 = padToLength(b, 44);
                 try {
@@ -253,7 +321,8 @@ public class MainActivity extends AppCompatActivity {
             }
 
             // TD2 candidate (pad to 36)
-            if (isLengthApprox(a, 36) || isLengthApprox(b, 36)) {
+            if ((isLengthApprox(a, 36) || isLengthApprox(b, 36))
+                    && looksLikeMrzLine(a) && looksLikeMrzLine(b)) {
                 String l1 = padToLength(a, 36);
                 String l2 = padToLength(b, 36);
                 try {
@@ -263,7 +332,7 @@ public class MainActivity extends AppCompatActivity {
             }
 
             // Fallback: try pad 44 even if slightly shorter (some OCR trim)
-            if (a.length() >= 20 && b.length() >= 20) {
+            if (a.length() >= 20 && b.length() >= 20 && looksLikeMrzLine(a) && looksLikeMrzLine(b)) {
                 String l1 = padToLength(a, 44);
                 String l2 = padToLength(b, 44);
                 try {
@@ -290,6 +359,15 @@ public class MainActivity extends AppCompatActivity {
         StringBuilder sb = new StringBuilder(s);
         while (sb.length() < len) sb.append('<');
         return sb.toString();
+    }
+
+    private boolean looksLikeMrzLine(String s) {
+        if (s == null) return false;
+        int len = s.length();
+        int chevrons = 0;
+        for (int i = 0; i < len; i++) if (s.charAt(i) == '<') chevrons++;
+        // MRZ lines usually contain many '<' as fillers; require at least 20% '<'
+        return chevrons >= Math.max(3, len / 5);
     }
 
     // ---------- Heuristic corrections (mạnh hơn) ----------
@@ -418,18 +496,22 @@ public class MainActivity extends AppCompatActivity {
 
     private void resetScanning() {
         isScanning = true;
+        lastCandidate = null;
+        stableHits = 0;
         statusText.setText("Đặt MRZ của hộ chiếu vào khung màu vàng");
         statusText.setBackgroundColor(0x99000000);
         statusText.setOnClickListener(null);
         mrzFrame.setBackgroundResource(R.drawable.mrz_frame);
         Toast.makeText(this, "Bắt đầu quét lại...", Toast.LENGTH_SHORT).show();
+        updateFocusMetering();
     }
 
     // ---------- helpers & small classes ----------
     private static class OcrLine {
         public final String raw;
         public final String norm;
-        public OcrLine(String raw, String norm) { this.raw = raw; this.norm = norm; }
+        public final float centerY;
+        public OcrLine(String raw, String norm, float centerY) { this.raw = raw; this.norm = norm; this.centerY = centerY; }
     }
 
     private static class Pair<F,S> {
@@ -443,5 +525,49 @@ public class MainActivity extends AppCompatActivity {
         super.onDestroy();
         cameraExecutor.shutdown();
         recognizer.close();
+    }
+
+    // ---------- Camera controls: AF/AE on MRZ region & torch ----------
+    private void updateFocusMetering() {
+        if (cameraControl == null) return;
+        if (previewView.getWidth() == 0 || previewView.getHeight() == 0) return;
+
+        try {
+            MeteringPointFactory factory = previewView.getMeteringPointFactory();
+            if (factory == null) return;
+
+            float cx = (mrzFrame.getX() + mrzFrame.getWidth() / 2f) / (float) previewView.getWidth();
+            float cy = (mrzFrame.getY() + mrzFrame.getHeight() / 2f) / (float) previewView.getHeight();
+
+            MeteringPoint afPoint = factory.createPoint(cx * previewView.getWidth(), cy * previewView.getHeight());
+            FocusMeteringAction action = new FocusMeteringAction.Builder(afPoint,
+                    FocusMeteringAction.FLAG_AF | FocusMeteringAction.FLAG_AE)
+                    .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                    .build();
+            cameraControl.startFocusAndMetering(action);
+        } catch (Throwable t) {
+            Log.w("MRZ", "Focus/metering not supported: " + t.getMessage());
+        }
+    }
+
+    private void setupTorchUi() {
+        if (torchToggle == null) return;
+        torchToggle.setOnClickListener(v -> toggleTorch());
+        if (cameraInfo != null) {
+            boolean hasFlash = cameraInfo.hasFlashUnit();
+            torchToggle.setVisibility(hasFlash ? View.VISIBLE : View.GONE);
+        }
+    }
+
+    private boolean torchOn = false;
+    private void toggleTorch() {
+        if (cameraControl == null || cameraInfo == null) return;
+        if (!cameraInfo.hasFlashUnit()) return;
+        try {
+            torchOn = !torchOn;
+            cameraControl.enableTorch(torchOn);
+        } catch (Throwable t) {
+            Log.w("MRZ", "Torch toggle failed: " + t.getMessage());
+        }
     }
 }
